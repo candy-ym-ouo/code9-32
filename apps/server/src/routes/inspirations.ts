@@ -34,7 +34,7 @@ import {
 } from '../services/inspirations.js';
 import { toAssetDto, toAnnotationDto, toInspirationDto, toSpotDto } from '../services/serialization.js';
 import type { SerializeContext } from '../services/serialization.js';
-import { ingestAsset, type AssetRow } from '../services/assets.js';
+import { deleteAsset, ingestAsset, sweepAssetFileGc, type AssetRow } from '../services/assets.js';
 import { clearFuzzCache, loadSpotRow } from '../services/fuzzing.js';
 import { loadSpotGeom } from '../services/windowEngine.js';
 import { azimuthAt, elevationAt, utcToZonedParts, zonedTimeToUtc } from '@flil/shared';
@@ -344,8 +344,27 @@ inspirationRouter.delete(
   ah(async (req, res) => {
     const ctx = ctxOf(req);
     const row = loadAsset(req.params.id, ctx.libraryId);
-    getDb().prepare('DELETE FROM asset WHERE id = ?').run(row.id);
-    ok(res, { deleted: true });
+    // 数据库行先删（分享令牌范围内的图片同步失效），随后清理原图/缩略图/分享副本；
+    // 文件删除失败不回滚删除结果，而是登记到 asset_file_gc 等待重试（见下一个端点与定时任务）。
+    const result = deleteAsset(row);
+    ok(res, {
+      deleted: true,
+      filesRemoved: result.removed,
+      filesPending: result.pending,
+    });
+  }),
+);
+
+/**
+ * 重试本库删除素材后残留的派生文件（原图/缩略图/分享副本）。
+ * 忽略退避窗口立即重试一次；仍失败的继续保留在 asset_file_gc，由定时任务兜底。
+ */
+inspirationRouter.post(
+  '/asset-gc/retry',
+  ah(async (req, res) => {
+    const ctx = ctxOf(req);
+    const result = sweepAssetFileGc({ libraryId: ctx.libraryId, force: true });
+    ok(res, { ...result, ok: result.pending === 0 });
   }),
 );
 

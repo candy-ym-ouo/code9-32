@@ -75,7 +75,18 @@ opsRouter.get(
     ) as { id: string; file_path: string; thumb_path: string | null }[];
     const missing = rows.filter((r) => !fs.existsSync(r.file_path)).map((r) => r.id);
     const missingThumbs = rows.filter((r) => r.thumb_path && !fs.existsSync(r.thumb_path)).map((r) => r.id);
-    ok(res, { total: rows.length, missing, missingThumbs });
+    // 已删除素材但派生文件尚未清理干净的残留（可 POST /api/asset-gc/retry 或等定时任务重试）
+    const pendingGcRows = getDb()
+      .prepare(
+        `SELECT kind, COUNT(*) AS n FROM asset_file_gc WHERE library_id = ? AND status = 'pending' GROUP BY kind`,
+      )
+      .all(ctx.libraryId) as { kind: string; n: number }[];
+    const pendingGc = pendingGcRows.reduce<Record<string, number>>((acc, r) => {
+      acc[r.kind] = r.n;
+      return acc;
+    }, {});
+    const pendingGcTotal = pendingGcRows.reduce((sum, r) => sum + r.n, 0);
+    ok(res, { total: rows.length, missing, missingThumbs, pendingGc, pendingGcTotal });
   }),
 );
 

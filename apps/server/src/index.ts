@@ -5,6 +5,7 @@ import { migrate, getDb } from './db.js';
 import { logger } from './logger.js';
 import { scanWindowsForAllLibraries } from './jobs/windowScan.js';
 import { dispatchForAllLibraries } from './jobs/dispatch.js';
+import { sweepAssetGcForAllLibraries } from './jobs/assetGc.js';
 
 export function bootstrap(): void {
   ensureDirs();
@@ -12,6 +13,15 @@ export function bootstrap(): void {
   if (applied.length) logger.info('数据库迁移已应用', { files: applied });
 
   const app = createApp();
+
+  // 启动即清理一次：处理服务停机期间到期的删除残留（上次崩溃/占用未删掉的派生文件）
+  try {
+    const swept = sweepAssetGcForAllLibraries();
+    if (swept.removed || swept.totalPending) logger.info('启动派生文件清理', swept);
+  } catch (err) {
+    logger.warn('启动派生文件清理失败', { error: String(err) });
+  }
+
   const server = app.listen(config.port, () => {
     logger.info('服务已启动', {
       port: config.port,
@@ -41,11 +51,21 @@ export function bootstrap(): void {
     );
   });
 
+  // 每 30 分钟清理删除素材后残留的原图/缩略图/分享副本（只处理退避到期的记录，带退避重试）
+  const assetGcTask = cron.schedule('*/30 * * * *', () => {
+    try {
+      sweepAssetGcForAllLibraries();
+    } catch (err) {
+      logger.error('派生文件清理失败', { error: String(err) });
+    }
+  });
+
   const shutdown = () => {
     logger.info('正在关闭服务');
     windowTask.stop();
     dailyTask.stop();
     hourlyTask.stop();
+    assetGcTask.stop();
     server.close(() => {
       try {
         getDb().close();
