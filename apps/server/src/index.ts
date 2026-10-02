@@ -5,6 +5,7 @@ import { migrate, getDb } from './db.js';
 import { logger } from './logger.js';
 import { scanWindowsForAllLibraries } from './jobs/windowScan.js';
 import { dispatchForAllLibraries } from './jobs/dispatch.js';
+import { sweepDueAssetCleanup } from './services/assets.js';
 
 export function bootstrap(): void {
   ensureDirs();
@@ -29,6 +30,20 @@ export function bootstrap(): void {
     void scanWindowsForAllLibraries().catch((err) => logger.error('窗口扫描失败', { error: String(err) }));
   });
 
+  // 启动时 + 每 5 分钟补偿重试删除失败的素材文件（原图/缩略图/分享副本）
+  const runCleanupSweep = () => {
+    try {
+      const result = sweepDueAssetCleanup();
+      if (result.removed.length || result.pending.length) {
+        logger.info('素材文件清理扫描完成', { removed: result.removed.length, pending: result.pending.length });
+      }
+    } catch (err) {
+      logger.error('素材文件清理扫描失败', { error: String(err) });
+    }
+  };
+  runCleanupSweep();
+  const cleanupTask = cron.schedule('*/5 * * * *', runCleanupSweep);
+
   // 每日 08:10 求值规则并派发提醒；每小时兜底派发一次（带幂等）
   const dailyTask = cron.schedule('10 8 * * *', () => {
     void dispatchForAllLibraries({ evaluate: true }).catch((err) =>
@@ -44,6 +59,7 @@ export function bootstrap(): void {
   const shutdown = () => {
     logger.info('正在关闭服务');
     windowTask.stop();
+    cleanupTask.stop();
     dailyTask.stop();
     hourlyTask.stop();
     server.close(() => {

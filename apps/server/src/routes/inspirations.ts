@@ -34,7 +34,7 @@ import {
 } from '../services/inspirations.js';
 import { toAssetDto, toAnnotationDto, toInspirationDto, toSpotDto } from '../services/serialization.js';
 import type { SerializeContext } from '../services/serialization.js';
-import { ingestAsset, type AssetRow } from '../services/assets.js';
+import { deleteAsset, ingestAsset, retryAssetCleanup, type AssetRow } from '../services/assets.js';
 import { clearFuzzCache, loadSpotRow } from '../services/fuzzing.js';
 import { loadSpotGeom } from '../services/windowEngine.js';
 import { azimuthAt, elevationAt, utcToZonedParts, zonedTimeToUtc } from '@flil/shared';
@@ -297,6 +297,21 @@ function loadAsset(assetId: string, libraryId: string): AssetRow {
   return row;
 }
 
+/** 素材已删、只剩清理队列记录时，凭队列里的 library_id 做越权校验 */
+function loadAssetOrPending(assetId: string, libraryId: string): void {
+  const row = getDb().prepare('SELECT library_id FROM asset WHERE id = ?').get(assetId) as
+    | { library_id: string }
+    | undefined;
+  if (row) {
+    if (row.library_id !== libraryId) throw errors.scopeDenied();
+    return;
+  }
+  const pending = getDb()
+    .prepare('SELECT 1 AS x FROM file_cleanup WHERE asset_id = ? AND library_id = ? LIMIT 1')
+    .get(assetId, libraryId);
+  if (!pending) throw errors.notFound('图片');
+}
+
 inspirationRouter.get(
   '/assets/:id/file',
   ah(async (req, res) => {
@@ -344,8 +359,39 @@ inspirationRouter.delete(
   ah(async (req, res) => {
     const ctx = ctxOf(req);
     const row = loadAsset(req.params.id, ctx.libraryId);
-    getDb().prepare('DELETE FROM asset WHERE id = ?').run(row.id);
-    ok(res, { deleted: true });
+    // 先删 asset 行（分享令牌/原图/缩略图访问即刻 404），再清理三类磁盘文件；
+    // 文件删除失败不回滚删除结果，登记为可重试的清理项返回给调用方
+    const result = deleteAsset(row);
+    syncStatus(row.inspiration_id);
+    ok(res, {
+      deleted: true,
+      filesRemoved: result.removed.length,
+      filesPending: result.pending.length,
+      pending: result.pending,
+    });
+  }),
+);
+
+/**
+ * 手动重试残留文件清理（删除素材时磁盘文件没删掉的兜底入口）。
+ * 可带 :assetId 只重试某一张，也可对整库重试；幂等，重复调用安全。
+ */
+inspirationRouter.post(
+  '/assets/:id/cleanup-retry',
+  ah(async (req, res) => {
+    const ctx = ctxOf(req);
+    loadAssetOrPending(req.params.id, ctx.libraryId);
+    const result = retryAssetCleanup(ctx.libraryId, req.params.id);
+    ok(res, { filesRemoved: result.removed.length, filesPending: result.pending.length, pending: result.pending });
+  }),
+);
+
+inspirationRouter.post(
+  '/assets-cleanup/retry',
+  ah(async (req, res) => {
+    const ctx = ctxOf(req);
+    const result = retryAssetCleanup(ctx.libraryId);
+    ok(res, { filesRemoved: result.removed.length, filesPending: result.pending.length, pending: result.pending });
   }),
 );
 

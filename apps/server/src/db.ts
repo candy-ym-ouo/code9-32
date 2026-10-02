@@ -14,6 +14,9 @@ export function getDb(): SqliteDb {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.pragma('busy_timeout = 5000');
+    // 新打开（含备份还原后重连）的库也要追到当前 schema，
+    // 否则代码依赖的新表（如 file_cleanup）在旧快照上可能不存在。
+    applyMigrations();
   }
   return db;
 }
@@ -27,7 +30,11 @@ export function closeDb(): void {
 
 /** 按文件名顺序应用 sql/*.sql，已应用过的记录在 _migration 表 */
 export function migrate(): string[] {
-  const database = getDb();
+  return applyMigrations();
+}
+
+function applyMigrations(): string[] {
+  const database = getInitializedDb();
   database.exec(
     'CREATE TABLE IF NOT EXISTS _migration (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
   );
@@ -52,6 +59,18 @@ export function migrate(): string[] {
     ran.push(file);
   }
   return ran;
+}
+
+function getInitializedDb(): SqliteDb {
+  if (!db) {
+    // 仅迁移内部使用：正常路径下 getDb() 已创建连接
+    ensureDirs();
+    db = new Database(config.databaseFile);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    db.pragma('busy_timeout = 5000');
+  }
+  return db;
 }
 
 export function nowIso(): string {

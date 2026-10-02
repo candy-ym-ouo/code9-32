@@ -10,6 +10,7 @@ import { ctxOf } from '../http/context.js';
 import { errors } from '../http/errors.js';
 import { createBackup, exportAll, listBackups, restoreBackup } from '../services/backup.js';
 import { addTags, createInspiration, requireInspiration } from '../services/inspirations.js';
+import { listPendingCleanup } from '../services/assets.js';
 import { subscribe } from '../services/events.js';
 import { recomputeHitRate } from '../services/calibration.js';
 import { toJson } from '../db.js';
@@ -75,7 +76,14 @@ opsRouter.get(
     ) as { id: string; file_path: string; thumb_path: string | null }[];
     const missing = rows.filter((r) => !fs.existsSync(r.file_path)).map((r) => r.id);
     const missingThumbs = rows.filter((r) => r.thumb_path && !fs.existsSync(r.thumb_path)).map((r) => r.id);
-    ok(res, { total: rows.length, missing, missingThumbs });
+    const pendingCleanups = listPendingCleanup(ctx.libraryId);
+    ok(res, {
+      total: rows.length,
+      missing,
+      missingThumbs,
+      pendingCleanups,
+      pendingCleanupCount: pendingCleanups.length,
+    });
   }),
 );
 
